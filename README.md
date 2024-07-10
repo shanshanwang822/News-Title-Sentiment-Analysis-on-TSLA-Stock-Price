@@ -5,3 +5,5 @@ As such, this project aims to understand how news sentiment reflected in headlin
 
 
 Note: This is a collaborated project, credit also to:Leo Liu, Mika Tanchavanich and Wanyi Liu
+
+Slides:https://docs.google.com/presentation/d/1fdJ7rxpUzAFB03C1Yr_C54Qu1op2X4hnFB3hdnkVy4A/edit?usp=sharing
