@@ -1,0 +1,269 @@
+---
+title: "APAN5205"
+output: html_document
+date: "2024-04-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("/Users/uriuri/Downloads")
+tsla = read.csv("/Users/uriuri/Downloads/Archive/TSLA.csv")
+news_title = read.csv("/Users/uriuri/Downloads/Archive/clean_news_title.csv")
+```
+
+
+# Libraries Needed:
+```{r}
+library(dplyr)
+library(lubridate)
+ library(tidytext); library(magrittr)
+library(tm)
+library(devtools)
+library(textdata)
+library(wordcloud)
+library(ggplot2)
+library(xgboost)
+library(tidyr)
+library(caret)
+```
+
+
+# Data Preparation
+```{R}
+#keep consistent column name and type for both dataframes
+colnames(news_title) <- c('Date','title')
+date_obj <- as.Date(news_title$Date, format = "%d-%b-%y")
+
+# Convert from Date object to %Y-%m-%d format
+news_title$Date <- format(date_obj, "%Y-%m-%d")
+
+
+# Group by Date and combine news titles into a single column
+combined_news <- news_title %>%
+  group_by(Date) %>%
+  summarize(combined_title = paste(title, collapse = " "))
+
+```
+
+##Inner join cleaned datasets
+```{R}
+#inner join news headlines with tesla stock data
+df <- inner_join(combined_news, tsla, by = "Date")
+
+# Select only the 'Date', 'Close', and 'title' columns
+df <- df %>%
+  select(Date, combined_title, Close)
+
+
+colnames(df) <- c('Date','title','Close')
+
+```
+
+
+## Title Tokenization
+```{R}
+
+df%>%
+  unnest_tokens(input = title, output = word)%>%
+  select(word)%>%
+  group_by(word)%>%
+  summarize(count = n())%>%
+  ungroup()%>%
+  arrange(desc(count))%>%
+  top_n(25)
+
+```
+
+## apply stop words for dataframe and visualization
+```{r}
+netural_stop_words <- data_frame(word = c('tesla', 'stocks', 'stock', 'tsla','2024','2023'))
+
+df %>%
+  unnest_tokens(input = title, output = word) %>%
+  anti_join(netural_stop_words) %>%
+  anti_join(stop_words)%>%
+  group_by(word) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  arrange(desc(count)) %>%
+  top_n(25)%>%
+  ggplot(aes(x=reorder(word,count), y=count, fill=count))+
+    geom_col()+
+    xlab('words')+
+    ggtitle('Top 25 Frequent Words')+
+    coord_flip()
+
+
+df %>%
+  unnest_tokens(input = title, output = word) %>%
+  anti_join(netural_stop_words, by = "word") %>%
+  group_by(word) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  arrange(desc(count)) %>%
+  top_n(30) %>%
+  # Now use the wordcloud function
+  {wordcloud(words = .$word, freq = .$count, scale = c(3, 0.5), max.words = 100, random.order = FALSE, rot.per = 0.1, colors = brewer.pal(8, "Dark2"))}
+
+```
+##loading lexicons
+```{r}
+df_loug <- df
+#load nrc and loughran lexicon
+install_github("juliasilge/tidytext")
+
+loughran = get_sentiments("loughran")
+
+```
+
+##Join Lexicon Emotions
+```{r}
+loug_emotion_summary<-df_loug%>%
+  group_by(Date) %>% 
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(loughran)%>% 
+  count(sentiment) %>% 
+  spread(sentiment, n, fill = 0)  
+
+loug_sentiment_by_date <- loug_emotion_summary %>%
+  group_by(Date) %>%
+  summarize(across(everything(), sum))
+tsla_sentiment_loug <- inner_join(tsla, loug_sentiment_by_date, by = "Date")
+
+```
+
+#Final Model
+## Loughran xgboost(RMSE:1.932149)
+```{r}
+#Note: This is the best model for this project, more models and evaluations in working R
+set.seed(617)
+# 80-20 split date
+split_date <- as.Date("2023-02-28") + days(floor(0.8 * 365))
+
+# Apply split
+train_lou <- tsla_sentiment_loug %>% filter(Date <= split_date)
+test_lou <- tsla_sentiment_loug %>% filter(Date > split_date)
+
+# Convert data to DMatrix object
+train_matrix <- xgb.DMatrix(data.matrix(train_lou[, -which(names(train_lou) == "Close")]), label = train_lou$Close)
+test_matrix <- xgb.DMatrix(data.matrix(test_lou[, -which(names(test_lou) == "Close")]), label = test_lou$Close)
+
+set.seed(123)
+xgb_model <- xgboost(data=train_matrix, nrounds=75, objective="reg:squarederror")
+
+# Predict on the test set
+xgb_predictions <- predict(xgb_model, test_matrix)
+rmse_xgb = sqrt(mean((xgb_predictions - test_lou$Close)^2)); rmse_xgb
+
+```
+
+##Tuning
+```{r}
+
+set.seed(617)
+# Convert data to DMatrix objects
+train_matrix <- xgb.DMatrix(data.matrix(train_lou[, -which(names(train_lou) == "Close")]), label = train_lou$Close)
+
+params <- list(
+  objective = "reg:squarederror",
+  eta = 0.1,                
+  max_depth = 6,            
+  subsample = 0.8,         
+  colsample_bytree = 0.8,  
+  gamma = 1,                
+  min_child_weight = 2      
+)
+
+# Apply k-fold cross-validation
+cv_results <- xgb.cv(
+  params = params,
+  data = train_matrix,
+  nrounds = 100, 
+  nfold = 5,        
+  metrics = "rmse",   # Metric to evaluate
+  early_stopping_rounds = 10, 
+  verbose = 1       
+)
+
+print(cv_results)
+
+
+best_nrounds <- cv_results$best_iteration
+print(paste("Best number of rounds:", best_nrounds))
+
+
+```
+
+
+##Prediction vs. Actual Visualization Using xgBoost 
+```{r}
+
+train_matrix <- xgb.DMatrix(data.matrix(train_lou[, -which(names(train_lou) == "Close")]), label = train_lou$Close)
+test_matrix <- xgb.DMatrix(data.matrix(test_lou[, -which(names(test_lou) == "Close")]), label = test_lou$Close)
+
+# Train the XGBoost model
+set.seed(123)
+xgb_model <- xgboost(data = train_matrix, nrounds = 100, objective = "reg:squarederror")
+
+# Predict on the test set
+xgb_predictions <- predict(xgb_model, test_matrix)
+# Convert date to POSIXct format
+test_lou$Date <- as.POSIXct(test_lou$Date)
+
+# Plot the XGBoost predictions vs actual values
+plot(test_lou$Date, xgb_predictions, type = "l", col = "red", xlab = "Date", ylab = "Price", main = "XGBoost Predictions vs Actual")
+lines(test_lou$Date, test_lou$Close, type = "l", col = "blue")
+legend("topright", legend = c("XGBoost Predictions", "Actual"), col = c("red", "blue"), lty = 1, cex = 0.8)
+
+# Calculate RMSE
+rmse_xgb <- sqrt(mean((xgb_predictions - test_lou$Close)^2))
+print(paste("XGBoost Test RMSE:", rmse_xgb))
+
+
+
+```
+#Confusion Matrix for Research Question
+```{r}
+set.seed(617)
+split_lou = sample(1:nrow(tsla_sentiment_loug),size = 0.7*nrow(tsla_sentiment_loug))
+train_lou = tsla_sentiment_loug[split,]
+test_lou = tsla_sentiment_loug[-split,]
+df1 <- train_lou
+df1$difference = df1$Close-df1$Open
+# Modify the data preparation step to ensure the "Classification" variable is binary
+df1 <- df1%>%
+  mutate(Classification = factor(ifelse(difference > 0, "Increase", "Decrease"), levels = c("Increase", "Decrease")))
+
+
+df1_test <- test_lou
+df1_test$difference = df1_test$Close-df1_test$Open
+df1_test <- df1_test %>%
+  mutate(Classification = factor(ifelse(difference > 0, "Increase", "Decrease"), levels = c("Increase", "Decrease")))
+
+# Fit a logistic regression model
+log_model <- glm(Classification ~ constraining + litigious + negative + positive + uncertainty,
+                 data = df1, family = binomial)
+
+
+# Predicting on the test set
+df1_test$Prediction <- predict(log_model, newdata = df1_test, type = "response")
+
+# Convert probabilities to binary classifications
+df1_test$Prediction <- ifelse(df1_test$Prediction > 0.5, "Increase", "Decrease")
+
+
+
+
+
+```
+
+```{r}
+df1_test$Prediction <- factor(df1_test$Prediction, levels = c("Increase", "Decrease"))
+df1_test$Classification <- factor(df1_test$Classification, levels = c("Increase", "Decrease"))
+conf_matrix <- confusionMatrix(df1_test$Prediction, df1_test$Classification)
+print(conf_matrix)
+
+```
+
+
+

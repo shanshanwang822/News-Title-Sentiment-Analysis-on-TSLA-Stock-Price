@@ -1,0 +1,880 @@
+---
+title: "group_project"
+output: html_document
+date: "2024-04-11"
+---
+
+# Work Directory
+
+```{r}
+#setwd("/Users/uriuri/Downloads")
+# tsla = read.csv("/Users/pomme/Downloads/TSLA.csv")
+# news_title = read.csv("/Users/pomme/Downloads/clean_news_title.csv")
+tsla = read.csv("C:/Users/l4450/OneDrive/Columbia/24Spring/apan5205/Project/TSLA.csv")
+news_title = read.csv("C:/Users/l4450/OneDrive/Columbia/24Spring/apan5205/Project/clean_news_title.csv")
+```
+
+# Libraries Needed:
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(tidytext); library(magrittr)
+library(tm)
+library(devtools)
+library(textdata)
+library(caret)
+library(ggplot2)
+```
+
+# Data Preparation
+
+```{R}
+#keep consistent column name and type for both dataframes
+colnames(news_title) <- c('Date','title')
+date_obj <- as.Date(news_title$Date, format = "%d-%b-%y")
+
+# Convert from Date object to %Y-%m-%d format
+news_title$Date <- format(date_obj, "%Y-%m-%d")
+
+
+# Group by Date and combine news titles into a single column
+combined_news <- news_title %>%
+  group_by(Date) %>%
+  summarize(combined_title = paste(title, collapse = " "))
+
+```
+
+```{R}
+#inner join news headlines with tesla stock data
+df <- inner_join(combined_news, tsla, by = "Date")
+
+df_c = df %>% 
+  mutate(Difference = Close - Open) %>% 
+  select(Date, combined_title, Difference)
+
+# Select only the 'Date', 'Close', and 'title' columns
+df <- df %>%
+  select(Date, combined_title, Close)
+
+
+colnames(df) <- c('Date','title','Close')
+
+summary(df)
+```
+
+## Title Tokenization
+
+```{R}
+# Find top 25 most common words in title
+df%>%
+  unnest_tokens(input = title, output = word)%>%
+  select(word)%>%
+  group_by(word)%>%
+  summarize(count = n())%>%
+  ungroup()%>%
+  arrange(desc(count))%>%
+  top_n(25)
+
+```
+
+## Neutral stop words for TSLA
+
+```{r}
+# Neutral stop words to remove 
+netural_stop_words <- data_frame(word = c('tesla', 'stocks', 'stock', 'tsla','2024','2023'))
+
+# Top 25 words excluding neutral stop words 
+df %>%
+  unnest_tokens(input = title, output = word) %>%
+  anti_join(netural_stop_words) %>%
+  group_by(word) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  arrange(desc(count)) %>%
+  top_n(25)%>%
+  ggplot(aes(x=reorder(word,count), y=count, fill=count))+
+    geom_col()+
+    xlab('words')+
+    ggtitle('Top 25 Frequent Words')+
+    coord_flip()
+```
+
+```{r}
+library(dplyr)
+library(tidytext)
+library(wordcloud)
+library(ggplot2)
+
+# Create word cloud of top words
+df %>%
+  unnest_tokens(input = title, output = word) %>%
+  anti_join(netural_stop_words, by = "word") %>%
+  group_by(word) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  arrange(desc(count)) %>%
+  top_n(30) %>%
+  # Now use the wordcloud function
+  {wordcloud(words = .$word, freq = .$count, scale = c(3, 0.5), max.words = 100, random.order = FALSE, rot.per = 0.1, colors = brewer.pal(8, "Dark2"))}
+
+```
+
+## Vectorization
+
+```{r}
+
+#Create a corpus
+corpus = Corpus(VectorSource(df$title))
+corpus[[2]][1]
+#Convert to lower case
+corpus = tm_map(corpus,FUN = content_transformer(tolower))
+corpus[[2]][1]
+#Remove punctuation
+corpus = tm_map(corpus,FUN = removePunctuation)
+corpus[[2]][1]
+#Strip whitespace
+corpus = tm_map(corpus,FUN = stripWhitespace)
+corpus[[2]][1]
+#remove stopwords
+corpus = tm_map(corpus,FUN = removeWords,c('tesla','stocks','stock','tsla'))
+corpus[[2]][1]
+
+```
+
+```{r}
+# Make copy for each lexicon (NRC and Loughran-McDonald)
+df_loug <- df
+df_nrc<-df
+```
+
+```{r}
+# Load nrc and loughran lexicon
+install_github("juliasilge/tidytext")
+
+loughran = get_sentiments("loughran")
+
+nrc = get_sentiments('nrc')
+```
+
+### Word Sentiment using NRC
+
+```{r}
+# Get sentiment of news title using NRC 
+df_nrc%>%
+  group_by(Date)%>%
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(nrc)%>%
+  group_by(sentiment)%>%
+  count()%>%
+  arrange(desc(n))
+
+```
+
+```{r}
+# Adding id since some news headlines don't have emotions
+library(tidyr)
+df$ID <- seq.int(nrow(df))
+
+# Showing emotions by id
+nrc_emotion_summary <- df_nrc %>% 
+  group_by(Date) %>% 
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(nrc)%>% 
+  count(sentiment) %>% 
+  spread(sentiment, n, fill = 0)  
+# Visualization by nrc
+
+```
+
+```{r}
+# Frequency plot of sentiment, sorted by count 
+library(ggthemes)
+df_nrc%>%
+  group_by(Date)%>%
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(nrc)%>%
+  group_by(sentiment)%>%
+  count()%>%
+  ggplot(aes(x=reorder(sentiment,X = n), y=n, fill=sentiment))+
+  geom_col()+
+  guides(fill=F)+
+  coord_flip()+
+  theme_wsj()
+```
+
+```{r}
+# Aggregate sentiment scores:
+nrc_sentiment_by_date <- nrc_emotion_summary %>%
+  group_by(Date) %>%
+  summarize(across(everything(), sum))
+# Inner join with stock price
+tsla_sentiment_nrc <- inner_join(tsla, nrc_sentiment_by_date, by = "Date")
+
+correlation_nrc <- cor(tsla_sentiment_nrc$Close, tsla_sentiment_nrc$positive)
+
+```
+
+```{r}
+# Display correlation for each sentiment and closing price
+library(tidyr)
+df_nrc%>%
+  group_by(Date, Close)%>%
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(nrc)%>%
+  group_by(Date,Close, sentiment)%>%
+  count()%>%
+  pivot_wider(names_from = sentiment,values_from=n)%>%
+  select(Date, Close, positive, negative, trust, anticipation, joy, fear, anger, sadness, surprise, disgust)%>%
+  mutate_at(.vars = 3:12, .funs = function(x) replace_na(x,0))%>%
+  ungroup()%>%
+  pivot_longer(cols = 3:12, names_to = 'sentiment',values_to = 'n')%>%
+  group_by(sentiment)%>%
+  summarize('Correlation with rating' = round(cor(n,Close),2),
+            p = ifelse(cor.test(n,Close)$p.value<0.05,'p < 0.05','not significant'))
+
+```
+
+```{r}
+# Split data to create model
+set.seed(617)
+split = sample(1:nrow(tsla_sentiment_nrc),size = 0.7*nrow(tsla_sentiment_nrc))
+train = tsla_sentiment_nrc[split,]
+test = tsla_sentiment_nrc[-split,]
+```
+
+# Models
+
+## Regression Model Testing for Sentiment Analysis(NRC) (RMSE 35.13927)
+
+```{r}
+
+nrc_model <- lm(Close ~ positive + negative+anger+anticipation+surprise+trust+joy+fear+sadness, data = train)
+
+summary(nrc_model)
+
+pred_nrc = predict(nrc_model,newdata=test)
+rmse_nrc = sqrt(mean((pred_nrc - test$Close)^2)); rmse_nrc
+```
+
+## NRC random forest model (RMSE 34.4228)
+
+```{r}
+library(randomForest)
+set.seed(123)  # Set a random seed for reproducibility
+rf_model <- randomForest(Close ~ positive + negative+anger+anticipation+surprise+trust+joy+fear+sadness, data = train, ntree=500)
+print(rf_model)
+
+rf_predictions <- predict(rf_model, newdata=test)
+rmse_rf = sqrt(mean((rf_predictions - test$Close)^2)); rmse_rf
+```
+
+## NRC xgboost (RMSE 2.429646)
+
+```{r}
+library(xgboost)
+# Convert data to DMatrix object
+train_matrix <- xgb.DMatrix(data.matrix(train[, -which(names(train) == "Close")]), label = train$Close)
+test_matrix <- xgb.DMatrix(data.matrix(test[, -which(names(test) == "Close")]), label = test$Close)
+
+set.seed(123)
+xgb_model <- xgboost(data=train_matrix, nrounds=100, objective="reg:squarederror")
+
+# Predict on the test set
+xgb_predictions <- predict(xgb_model, test_matrix)
+rmse_xgb = sqrt(mean((xgb_predictions - test$Close)^2)); rmse_xgb
+
+```
+
+## Topic Model (RMSE 37.20463)
+
+```{r}
+library(tm); library(SnowballC); library(magrittr)
+corpus = Corpus(VectorSource(df$title))
+corpus = 
+  corpus%>%
+  tm_map(content_transformer(tolower))%>%
+  tm_map(content_transformer(FUN = function(x)gsub(pattern = 'http[[:alnum:][:punct:]]*', replacement = ' ',x = x)))%>%
+  tm_map(removePunctuation)%>%
+  tm_map(removeWords, c('tesla', 'stocks', 'stock', 'tsla','2024','2023'))
+
+dict = findFreqTerms(DocumentTermMatrix(Corpus(VectorSource(df$title))),lowfreq = 0)
+dict_corpus = Corpus(VectorSource(dict))
+
+corpus = 
+  corpus %>%
+  tm_map(stemDocument)%>%
+  tm_map(stripWhitespace)
+
+dtm = DocumentTermMatrix(corpus)
+xdtm = removeSparseTerms(dtm,sparse = 0.95)
+xdtm = as.data.frame(as.matrix(xdtm))
+colnames(xdtm) = stemCompletion(x = colnames(xdtm),dictionary = dict_corpus,type = 'prevalent')
+colnames(xdtm) = make.names(colnames(xdtm))
+```
+
+```{r}
+xdtm_topic = xdtm[which(rowSums(xdtm)!=0),]
+library(topicmodels)
+set.seed(617)
+topic2 = LDA(x = xdtm_topic,k = 2)
+terms(topic2,10)
+```
+
+```{r}
+library(tibble)
+
+# Transform the matrix and terms into a data frame/tibble
+df_beta <- as.data.frame(t(exp(topic2@beta)))
+df_beta$terms <- row.names(df_beta)
+
+df_beta <- df_beta %>% distinct(terms, .keep_all = TRUE)
+
+
+colnames(df_beta)[1:ncol(df_beta) - 1] <- paste("topic", 1:(ncol(df_beta) - 1), sep = "")
+
+head(df_beta, 20)
+
+
+```
+
+### Document-Topic probabilities
+
+```{r}
+df_gamma = cbind(as.integer(topic2@documents), topic2@gamma)
+colnames(df_gamma) = c('id','topic1','topic2')
+df_gamma[1:10,]  # Document probabilities for first 10 documents
+```
+
+### Combine topics with original data
+
+```{r}
+text_topics = cbind(as.integer(topic2@documents),topic2@gamma)
+colnames(text_topics) = c('id','topic1','topic2')
+text_topics = merge(x = text_topics, y = df, by.x = 'id', by.y = 'ID')
+head(text_topics)
+```
+
+## Predictive Model Topic model with (RMSE 6.1)
+
+```{R}
+set.seed(617)
+split_topic = sample(1:nrow(text_topics),size = 0.7*nrow(text_topics))
+train_topic = text_topics[split_topic,]
+test_topic = text_topics[-split_topic,]
+
+library(rpart)
+model = rpart(Close~topic2+topic1,train_topic)
+pred = predict(model,newdata = test_topic)
+sqrt(mean((pred-test_topic$Close)^2))
+
+
+library(xgboost)
+# Convert data to DMatrix object
+train_matrix <- xgb.DMatrix(data.matrix(train_topic[, -which(names(train_topic) == "Close")]), label = train_topic$Close)
+test_matrix <- xgb.DMatrix(data.matrix(test_topic[, -which(names(test_topic) == "Close")]), label = test_topic$Close)
+
+set.seed(123)
+xgb_model <- xgboost(data=train_matrix, nrounds=98, objective="reg:squarederror")
+
+# Predict on the test set
+xgb_predictions <- predict(xgb_model, test_matrix)
+rmse_xgb = sqrt(mean((xgb_predictions - test$Close)^2)); rmse_xgb
+
+
+
+```
+
+## LSA
+
+```{r}
+library(lsa)
+clusters = lsa(xdtm)
+
+clusters$tk = as.data.frame(clusters$tk)
+colnames(clusters$tk) = paste0("dim",1:59)
+head(clusters$tk)
+
+```
+
+## predictive model (rpart after tuning RMSE 37.27802)
+
+```{r}
+clusters_data = cbind(id = df$ID, Close = df$Close,clusters$tk)
+
+set.seed(617)
+split_lsa = sample(1:nrow(clusters_data),size = 0.7*nrow(clusters_data))
+train_lsa = clusters_data[split_lsa,]
+test_lsa = clusters_data[-split_lsa,]
+
+model_lsa = rpart(Close~.-id,train_lsa)
+pred = predict(model_lsa,newdata = test_lsa)
+sqrt(mean((pred-test_lsa$Close)^2))
+
+```
+
+### Hyperparameter tuning
+
+```{R}
+library(caret)
+set.seed(617)
+# Create the tuning grid
+rpartGrid <- expand.grid(
+  .cp = seq(0.001, 0.1, by = 0.01)
+)
+
+# Setup train control for cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+
+# Run the training process
+rpart_model <- train(
+  Close ~ . -id,
+  data = train_lsa,
+  method = "rpart",
+  trControl = train_control,
+  tuneGrid = rpartGrid
+)
+
+# Inspect the best model
+print(rpart_model$bestTune)
+
+# Make predictions
+rpart_pred <- predict(rpart_model, newdata = test_lsa)
+
+# Calculate RMSE
+rpart_rmse <- sqrt(mean((rpart_pred - test_lsa$Close)^2))
+print(rpart_rmse)
+
+```
+
+## testing LSA on different model random forest (RMSE 33.00)
+
+```{R}
+library(randomForest)
+set.seed(617)
+rf_model <- randomForest(Close ~ . -id, data=train_lsa)
+rf_pred <- predict(rf_model, newdata=test_lsa)
+rf_rmse <- sqrt(mean((rf_pred - test_lsa$Close)^2))
+rf_rmse
+```
+
+### xgboost (RMSE 11.58)
+
+```{r}
+library(xgboost)
+# Convert data to DMatrix object
+train_matrix <- xgb.DMatrix(data.matrix(train_lsa[, -which(names(train_lsa) == "Close")]), label = train_lsa$Close)
+test_matrix <- xgb.DMatrix(data.matrix(test_lsa[, -which(names(test_lsa) == "Close")]), label = test_lsa$Close)
+
+set.seed(123)
+xgb_model <- xgboost(data=train_matrix, nrounds=100, objective="reg:squarederror")
+
+# Predict on the test set
+xgb_predictions <- predict(xgb_model, test_matrix)
+rmse_xgb = sqrt(mean((xgb_predictions - test$Close)^2)); rmse_xgb
+
+
+```
+
+## Word Sentiment using Loughran-McDonald
+
+```{r}
+df_loug%>%
+  group_by(Date)%>%
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(loughran)%>%
+  group_by(sentiment)%>%
+  count()%>%
+  arrange(desc(n))
+
+df_loug$ID <- seq.int(nrow(df_loug))
+```
+
+```{R}
+loug_emotion_summary<-df_loug%>%
+  group_by(Date) %>% 
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(loughran)%>% 
+  count(sentiment) %>% 
+  spread(sentiment, n, fill = 0)  
+
+loug_sentiment_by_date <- loug_emotion_summary %>%
+  group_by(Date) %>%
+  summarize(across(everything(), sum))
+tsla_sentiment_loug <- inner_join(tsla, loug_sentiment_by_date, by = "Date")
+```
+
+## Regression Model Testing for Sentiment Analysis(Loughran) (RMSE 35.15415)
+
+```{R}
+#split data for testing and training
+set.seed(617)
+split_lou = sample(1:nrow(tsla_sentiment_loug),size = 0.7*nrow(tsla_sentiment_loug))
+train_lou = tsla_sentiment_loug[split,]
+test_lou = tsla_sentiment_loug[-split,]
+
+
+lou_model <- lm(Close ~ constraining+litigious+negative+positive+uncertainty, data = train_lou)
+
+summary(lou_model)
+
+pred_lou = predict(lou_model,newdata=test_lou)
+rmse_lou = sqrt(mean((pred_lou - test_lou$Close)^2)); rmse_lou
+
+```
+
+## Loughran random forest model (RMSE 35.93417)
+
+```{r}
+library(randomForest)
+set.seed(123)  # Set a random seed for reproducibility
+rf_model <- randomForest(Close ~constraining+litigious+negative+positive+uncertainty, data = train_lou, ntree=500)
+print(rf_model)
+
+rf_predictions <- predict(rf_model, newdata=test_lou)
+rmse_rf = sqrt(mean((rf_predictions - test_lou$Close)^2)); rmse_rf
+```
+
+## Loughran xgboost (RMSE 1.932149)
+
+```{r}
+library(xgboost)
+# Convert data to DMatrix object
+train_matrix <- xgb.DMatrix(data.matrix(train_lou[, -which(names(train_lou) == "Close")]), label = train_lou$Close)
+test_matrix <- xgb.DMatrix(data.matrix(test_lou[, -which(names(test_lou) == "Close")]), label = test_lou$Close)
+
+set.seed(123)
+xgb_model <- xgboost(data=train_matrix, nrounds=100, objective="reg:squarederror")
+
+# Predict on the test set
+xgb_predictions <- predict(xgb_model, test_matrix)
+rmse_xgb = sqrt(mean((xgb_predictions - test_lou$Close)^2)); rmse_xgb
+
+```
+
+### tuning for best model
+
+```{r}
+library(xgboost)
+
+# Convert data to DMatrix objects
+train_matrix <- xgb.DMatrix(data.matrix(train_lou[, -which(names(train_lou) == "Close")]), label = train_lou$Close)
+
+
+params <- list(
+  objective = "reg:squarederror",
+  eta = 0.1,               
+  max_depth = 6,           
+  subsample = 0.8,        
+  colsample_bytree = 0.8,  
+  gamma = 1,              
+  min_child_weight = 2     
+)
+
+# Apply k-fold cross-validation
+cv_results <- xgb.cv(
+  params = params,
+  data = train_matrix,
+  nrounds = 100,      
+  nfold = 5,         
+  metrics = "rmse",  
+  early_stopping_rounds = 10, 
+  verbose = 1      
+)
+
+# Display results
+print(cv_results)
+
+# Find the best number of rounds based on CV results
+best_nrounds <- cv_results$best_iteration
+print(paste("Best number of rounds:", best_nrounds))
+
+
+```
+
+### Loughran visualization
+
+```{r}
+df_loug%>%
+  group_by(Date)%>%
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(loughran)%>%
+  group_by(sentiment)%>%
+  count()%>%
+  ggplot(aes(x=reorder(sentiment,X = n), y=n, fill=sentiment))+
+  geom_col()+
+  guides(fill=F)+
+  coord_flip()+
+  theme_wsj()
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidytext)
+
+# Ensure that `loughran` only contains unique words before joining
+loughran <- loughran %>% distinct(word, .keep_all = TRUE)
+
+# Process df_loug
+df_loug_processed <- df_loug %>%
+  group_by(Date, Close) %>%
+  unnest_tokens(output = word, input = title) %>%
+  inner_join(loughran, by = "word") %>%
+  count(Date, Close, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = list(n = 0)) %>%
+  select(Date, Close, constraining, litigious, negative, positive, uncertainty) %>%
+  mutate(across(constraining:uncertainty, ~replace_na(.x, 0))) %>%
+  pivot_longer(cols = constraining:uncertainty, names_to = 'sentiment', values_to = 'n')
+
+# Calculate correlation and significance
+correlation_summary <- df_loug_processed %>%
+  group_by(sentiment) %>%
+  summarize(
+    `Correlation with Close` = round(cor(n, Close), 2),
+    p = ifelse(cor.test(n, Close)$p.value < 0.05, 'p < 0.05', 'not significant')
+  )
+  
+# View the result
+print(correlation_summary)
+
+```
+
+## Time series: 46.7
+
+```{R}
+# 80-20 split date
+split_date <- as.Date("2023-02-28") + days(floor(0.8 * 365))
+
+# Apply split
+train_ts <- tsla_sentiment_loug %>% filter(Date <= split_date)
+test_ts <- tsla_sentiment_loug %>% filter(Date > split_date)
+
+
+```
+
+```{r}
+library(forecast)
+y_train <- train_ts$Close
+xreg_train <- as.matrix(train_ts[, c("constraining", "litigious", "negative", "positive", "uncertainty")])
+y_test <- test_ts$Close
+xreg_test <- as.matrix(test_ts[, c("constraining", "litigious", "negative", "positive", "uncertainty")])
+
+# Fit the ARIMA model with training data
+arima_model <- auto.arima(y_train, xreg = xreg_train)
+
+# Summarize the model
+summary(arima_model)
+
+# Forecast on test data
+forecasted <- forecast(arima_model, xreg = xreg_test)
+
+# Plot the forecast
+plot(forecasted)
+
+# Calculate RMSE
+rmse <- sqrt(mean((forecasted$mean - y_test)^2))
+print(paste("Test RMSE:", rmse))
+
+
+```
+
+```{r}
+library(xgboost)
+
+# Convert data to DMatrix object
+train_matrix <- xgb.DMatrix(data.matrix(train_ts[, -which(names(train_ts) == "Close")]), label = train_ts$Close)
+test_matrix <- xgb.DMatrix(data.matrix(test_ts[, -which(names(test_ts) == "Close")]), label = test_ts$Close)
+
+# Train the XGBoost model
+set.seed(123)
+xgb_model <- xgboost(data = train_matrix, nrounds = 100, objective = "reg:squarederror")
+
+# Predict on the test set
+xgb_predictions <- predict(xgb_model, test_matrix)
+# Convert date to POSIXct format
+test_ts$Date <- as.POSIXct(test_ts$Date)
+
+# Plot the XGBoost predictions vs actual values
+plot(test_ts$Date, xgb_predictions, type = "l", col = "red", xlab = "Date", ylab = "Price", main = "XGBoost Predictions vs Actual")
+lines(test_ts$Date, test_ts$Close, type = "l", col = "blue")
+legend("topright", legend = c("XGBoost Predictions", "Actual"), col = c("red", "blue"), lty = 1, cex = 0.8)
+
+# Calculate RMSE
+rmse_xgb <- sqrt(mean((xgb_predictions - test_ts$Close)^2))
+print(paste("XGBoost Test RMSE:", rmse_xgb))
+
+
+```
+
+# Visualization for top 10 difference in Close - Open
+
+```{r}
+# First, ensure both Date columns are in the same format
+df_loug$Date <- as.Date(df_loug$Date)
+tsla$Date <- as.Date(tsla$Date)
+
+# Merge the df_loug and tsla data frames by Date
+merged_df <- merge(df_loug, tsla, by = "Date")
+
+# Calculate the difference between closing and opening prices
+merged_df$difference <- abs(merged_df$Close.x - merged_df$Open)
+
+# Sort the data frame based on the difference in descending order
+top_diff <- merged_df[order(-merged_df$difference), ]
+
+top_diff <- head(top_diff, 10)
+
+# Show the top 5 rows with highest price differences
+print(top_diff)
+
+# Of the rows with the highest price difference, count how many are in each sentiment
+top_diff%>%
+  group_by(Date)%>%
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(loughran)%>%
+  group_by(sentiment)%>%
+  count()%>%
+  arrange(desc(n))
+
+
+```
+
+```{r}
+loug_emotion_summary<-top_diff%>%
+  group_by(Date) %>% 
+  unnest_tokens(output = word, input = title)%>%
+  inner_join(loughran)%>% 
+  count(sentiment) %>% 
+  spread(sentiment, n, fill = 0)  
+
+
+loug_sentiment_by_date <- loug_emotion_summary %>%
+  group_by(Date) %>%
+  summarize(across(everything(), sum))
+top_diff <- inner_join(top_diff, loug_sentiment_by_date, by = "Date")
+
+top_diff1<-top_diff%>%
+  select(-c('Volume','Adj.Close','Close.y','Low','High','title'))
+
+top_diff1$difference = top_diff1$Close.x- top_diff1$Open
+```
+
+## Logistic Model
+
+```{r}
+# Create logistic model to see if sentiment can determine whether price will increase or decrease
+set.seed(617)
+split_lou = sample(1:nrow(tsla_sentiment_loug),size = 0.7*nrow(tsla_sentiment_loug))
+train_lou = tsla_sentiment_loug[split,]
+test_lou = tsla_sentiment_loug[-split,]
+df1 <- train_lou
+df1$difference = df1$Close-df1$Open
+# Modify the data preparation step to ensure the "Classification" variable is binary
+df1 <- df1%>%
+  mutate(Classification = factor(ifelse(difference > 0, "Increase", "Decrease"), levels = c("Increase", "Decrease")))
+
+
+df1_test <- test_lou
+df1_test$difference = df1_test$Close-df1_test$Open
+df1_test <- df1_test %>%
+  mutate(Classification = factor(ifelse(difference > 0, "Increase", "Decrease"), levels = c("Increase", "Decrease")))
+
+# Fit a logistic regression model
+log_model <- glm(Classification ~ constraining + litigious + negative + positive + uncertainty,
+                 data = df1, family = binomial)
+
+
+# Predicting on the test set
+df1_test$Prediction <- predict(log_model, newdata = df1_test, type = "response")
+
+# Convert probabilities to binary classifications
+df1_test$Prediction <- ifelse(df1_test$Prediction > 0.5, "Increase", "Decrease")
+
+
+```
+
+```{r}
+# Create confusion matrix for log regression
+df1_test$Prediction <- factor(df1_test$Prediction, levels = c("Increase", "Decrease"))
+df1_test$Classification <- factor(df1_test$Classification, levels = c("Increase", "Decrease"))
+conf_matrix <- confusionMatrix(df1_test$Prediction, df1_test$Classification)
+print(conf_matrix)
+
+```
+
+# News title predictive analysis for price movement - tree model
+
+```{r}
+df_123 = df_c%>% 
+  mutate(Trend = case_when(Difference>0 ~ 1,
+                           Difference<0 ~ 0)) %>% 
+  select(-Difference)
+
+```
+
+```{r}
+# predictive analysis on news title
+library(tm)
+corpus = Corpus(VectorSource(df_123$combined_title))
+corpus = tm_map(corpus,FUN = content_transformer(tolower))
+corpus = tm_map(corpus,
+                FUN = content_transformer(FUN = function(x)gsub(pattern = 'http[[:alnum:][:punct:]]*',
+                                                                replacement = ' ',x = x)))
+corpus = tm_map(corpus,FUN = removePunctuation)
+corpus = tm_map(corpus,FUN = removeWords,c(stopwords('english')))
+corpus = tm_map(corpus,FUN = stripWhitespace)
+corpus = tm_map(corpus,FUN = removeNumbers)
+```
+
+```{r}
+dict = findFreqTerms(DocumentTermMatrix(Corpus(VectorSource(df_123$combined_title))),
+                     lowfreq = 0)
+dict_corpus = Corpus(VectorSource(dict))
+```
+
+```{r}
+corpus = tm_map(corpus,FUN = stemDocument)
+```
+
+```{r}
+dtm = DocumentTermMatrix(corpus)
+xdtm = removeSparseTerms(dtm,sparse = 0.95)
+```
+
+```{r}
+xdtm = as.data.frame(as.matrix(xdtm))
+colnames(xdtm) = stemCompletion(x = colnames(xdtm),
+                                dictionary = dict_corpus,
+                                type='prevalent')
+colnames(xdtm) = make.names(colnames(xdtm), unique = T)
+```
+
+```{r}
+dtm_tfidf = DocumentTermMatrix(x=corpus,
+                               control = list(weighting=function(x) weightTfIdf(x,normalize=F)))
+xdtm_tfidf = removeSparseTerms(dtm_tfidf,sparse = 0.95)
+xdtm_tfidf = as.data.frame(as.matrix(xdtm_tfidf))
+colnames(xdtm_tfidf) = stemCompletion(x = colnames(xdtm_tfidf),
+                                      dictionary = dict_corpus,
+                                      type='prevalent')
+colnames(xdtm_tfidf) = make.names(colnames(xdtm_tfidf), unique = T)
+```
+```{r}
+df_tf = cbind(trend = df_123$Trend, xdtm)
+df_tfidf = cbind(trend = df_123$Trend, xdtm_tfidf)
+```
+
+```{r}
+set.seed(5205)
+split = sample(1:nrow(df_tf),size = 0.7*nrow(df_tf))
+train = df_tf[split,]
+test = df_tf[-split,]
+```
+
+```{r}
+library(rpart.plot)
+tree = rpart(trend~.,train)
+rpart.plot(tree)
+```
